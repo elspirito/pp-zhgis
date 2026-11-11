@@ -1,0 +1,75 @@
+{
+  "id": "./",
+  "name": "ПП-каталог рецептов — Книга рецептов Никиты Игошева",
+  "short_name": "ПП-рецепты",
+  "description": "113 ПП-рецептов из книги Никиты Игошева: поиск по ингредиентам, фильтры по калориям и белку, список покупок и избранное.",
+  "lang": "ru",
+  "dir": "ltr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "background_color": "#f7f3ea",
+  "theme_color": "#f7f3ea",
+  "categories": ["food", "health", "lifestyle"],
+  "icons": [
+    {
+      "src": "assets/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "preview/mobile-catalog.png",
+      "sizes": "780x1688",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "Каталог рецептов с фильтрами по калориям и белку"
+    },
+    {
+      "src": "preview/desktop-catalog.png",
+      "sizes": "900x625",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Каталог рецептов на большом экране"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Найти рецепт",
+      "short_name": "Поиск",
+      "description": "Поиск по названию и ингредиентам",
+      "url": "./#search",
+      "icons": [{ "src": "assets/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Избранное",
+      "short_name": "Избранное",
+      "description": "Сохранённые рецепты",
+      "url": "./#favorites",
+      "icons": [{ "src": "assets/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Список покупок",
+      "short_name": "Покупки",
+      "description": "Ингредиенты для похода в магазин",
+      "url": "./#shopping",
+      "icons": [{ "src": "assets/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
+  ],
+  "prefer_related_applications": false
+}

@@ -79,6 +79,10 @@
   };
 
   const favorites = new Set(store.get('ppsk.favs', []));
+  let recentSearches = store.get('ppsk.recent', []).filter((x) => typeof x === 'string').slice(0, 8);
+  const saveRecent = () => store.set('ppsk.recent', recentSearches.slice(0, 8));
+  const mqMobile = window.matchMedia('(max-width: 900px)');
+  const isMobile = () => mqMobile.matches;
   let shopping = store.get('ppsk.shopping', []);
   const saveFavs = () => store.set('ppsk.favs', Array.from(favorites));
   const saveShopping = () => store.set('ppsk.shopping', shopping);
@@ -127,6 +131,43 @@
   let currentIndex = -1;
   let lastFocused = null;
   let searchTimer = null;
+  let sheetSearchTimer = null;
+
+  /* ---------- история: системная кнопка «назад» закрывает слои ---------- */
+  const hashFor = (kind, id) => (kind === 'recipe' ? '#recipe=' + encodeURIComponent(id) : '#' + kind);
+  function pushUI(kind, id) {
+    try { history.pushState({ ui: kind, id: id || null }, '', hashFor(kind, id)); } catch (e) { /* noop */ }
+  }
+  function replaceUI(kind, id) {
+    try {
+      if (!kind) history.replaceState({}, '', location.pathname + location.search);
+      else history.replaceState({ ui: kind, id: id || null }, '', hashFor(kind, id));
+    } catch (e) { /* noop */ }
+  }
+  // Закрытие слоя: если мы «стоим» на своей записи истории — идём назад,
+  // иначе просто чистим адрес (например, при прямом переходе по ссылке).
+  function closeUI(kind) {
+    const st = history.state;
+    if (st && st.ui === kind) { history.back(); return true; }
+    if (location.hash === hashFor(kind, st && st.id)) { replaceUI(null); }
+    return false;
+  }
+
+  // стек открытых слоёв — чтобы Esc и «назад» закрывали верхний
+  const overlays = [];
+  const pushOverlay = (name) => {
+    if (!overlays.includes(name)) overlays.push(name);
+    syncBodyLock();
+  };
+  const popOverlay = (name) => {
+    const i = overlays.indexOf(name);
+    if (i > -1) overlays.splice(i, 1);
+    syncBodyLock();
+  };
+  const topOverlay = () => overlays[overlays.length - 1] || null;
+  function syncBodyLock() {
+    document.body.classList.toggle('no-scroll', overlays.length > 0);
+  }
 
   /* ---------- matching ---------- */
   function matches(r, opts = {}) {
@@ -326,6 +367,10 @@
 
     $('#resetBtn').hidden = !hasActiveFilters();
     $('#favBtn').setAttribute('aria-pressed', state.favOnly ? 'true' : 'false');
+    if (!state.favOnly) {
+      const current = $('#tabbar .tab[aria-current="page"]');
+      if (current && current.dataset.tab === 'favorites') setActiveTab('catalog');
+    }
   }
 
   function renderAll() {
@@ -342,6 +387,34 @@
     $('#shopCount').textContent = shopping.length;
     $('#heroTotal').textContent = RECIPES.length;
     $('#footerCount').textContent = RECIPES.length;
+
+    const tabFav = $('#tabFavCount');
+    if (tabFav) {
+      tabFav.textContent = favorites.size;
+      tabFav.hidden = favorites.size === 0;
+    }
+    const tabShop = $('#tabShopCount');
+    if (tabShop) {
+      tabShop.textContent = shopping.length;
+      tabShop.hidden = shopping.length === 0;
+    }
+    const mCount = $('#mFilterCount');
+    if (mCount) {
+      const n = activeFilterCount();
+      mCount.textContent = n;
+      mCount.hidden = n === 0;
+    }
+    const mReset = $('#mResetBtn');
+    if (mReset) mReset.hidden = !hasActiveFilters();
+    const seg = $$('#sortSeg button');
+    seg.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.sort === state.sort)));
+  }
+
+  function activeFilterCount() {
+    return state.tags.size
+      + (state.maxKcal < 400 ? 1 : 0)
+      + (state.minProtein > 0 ? 1 : 0)
+      + (state.favOnly ? 1 : 0);
   }
 
   /* ---------- filters UI ---------- */
@@ -362,10 +435,36 @@
     $('#sortSelect').value = state.sort;
   }
 
-  function setFilterPanel(open) {
+  function setFilterPanel(open, opts = {}) {
+    const panel = $('#filterPanel');
+    const isOpen = !panel.hidden;
+    if (open === isOpen && !opts.force) return;
+
+    // закрытие/открытие через историю, чтобы работала системная кнопка «назад»
+    if (!open && isOpen && !opts.fromHistory && isMobile() && closeUI('filters')) return;
+    if (open && !isOpen && opts.push !== false && isMobile()) pushUI('filters');
+
+    applyFilterPanel(open);
+  }
+
+  function applyFilterPanel(open) {
+    const panel = $('#filterPanel');
     state.filtersOpen = open;
-    $('#filterPanel').hidden = !open;
+    panel.hidden = !open;
+    panel.setAttribute('aria-hidden', open ? 'false' : 'true');
     $('#filterBtn').setAttribute('aria-expanded', open ? 'true' : 'false');
+    const mBtn = $('#mFilterBtn');
+    if (mBtn) mBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+
+    if (isMobile()) {
+      if (open) pushOverlay('filters');
+      else popOverlay('filters');
+      if (open) {
+        panel.style.transform = '';
+        const first = panel.querySelector('.tag-chip:not([disabled]), button');
+        if (first) setTimeout(() => first.focus({ preventScroll: true }), 220);
+      }
+    }
   }
 
   function resetFilters() {
@@ -378,8 +477,10 @@
     state.sort = 'book';
     $('#searchInput').value = '';
     $('#searchClear').hidden = true;
+    applySearch('');
     syncFilterInputs();
     renderAll();
+    setActiveTab('catalog');
   }
 
   /* ---------- modal ---------- */
@@ -543,14 +644,13 @@
     $('#modalContent').innerHTML = modalHTML(r);
     const modal = $('#modal');
     modal.setAttribute('aria-hidden', 'false');
-    document.body.classList.add('no-scroll');
+    pushOverlay('recipe');
     const content = $('#modalContent');
     if (content) content.scrollTop = 0;
     updatePortion(r, 0);
     updateModalNav();
-    if (opts.push !== false) {
-      try { history.pushState({ recipe: id }, '', '#recipe=' + encodeURIComponent(id)); } catch (e) { /* noop */ }
-    }
+    updateRecipeBar(r);
+    if (opts.push !== false) pushUI('recipe', id);
     const closeBtn = $('.modal-close');
     if (closeBtn) closeBtn.focus({ preventScroll: true });
   }
@@ -558,15 +658,39 @@
   function closeModal(opts = {}) {
     const modal = $('#modal');
     if (modal.getAttribute('aria-hidden') === 'true') return;
+    if (!opts.fromHistory && closeUI('recipe')) return;
     modal.setAttribute('aria-hidden', 'true');
-    document.body.classList.remove('no-scroll');
-    if (opts.clearHash !== false) {
+    popOverlay('recipe');
+    if (opts.clearHash !== false && !opts.fromHistory) {
       try { history.replaceState({}, '', location.pathname + location.search); } catch (e) { /* noop */ }
     }
     if (lastFocused && typeof lastFocused.focus === 'function') {
       try { lastFocused.focus({ preventScroll: true }); } catch (e) { /* noop */ }
     }
     currentRecipe = null;
+  }
+
+  function updateRecipeBar(r) {
+    const bar = $('#recipeBar');
+    if (!bar) return;
+    bar.hidden = false;
+    const fav = bar.querySelector('[data-fav-modal]');
+    if (fav) {
+      fav.dataset.favModal = r.id;
+      const on = favorites.has(r.id);
+      fav.setAttribute('aria-pressed', String(on));
+      fav.setAttribute('aria-label', on ? 'Убрать из избранного' : 'В избранное');
+    }
+    const add = bar.querySelector('[data-add-shop]');
+    if (add) add.dataset.addShop = r.id;
+    const share = $('#shareRecipe');
+    if (share) share.hidden = !(navigator.share || navigator.clipboard);
+    const mini = $('#modalMiniTitle');
+    if (mini) mini.textContent = r.title;
+    const miniMeta = $('#modalMiniMeta');
+    if (miniMeta) miniMeta.textContent = `${fmt(r._primary.kcal100)} ккал · Б ${formatMacro(r._primary.protein100)} г`;
+    const miniBar = $('#modalMini');
+    if (miniBar) miniBar.classList.remove('show');
   }
 
   function updateModalNav() {
@@ -578,6 +702,149 @@
     if (!currentRecipe || currentList.length < 2) return;
     currentIndex = (currentIndex + delta + currentList.length) % currentList.length;
     openRecipe(currentList[currentIndex].id, { push: true });
+  }
+
+  /* ---------- поиск (шторка) ---------- */
+  function openSearchSheet(opts = {}) {
+    const sheet = $('#searchSheet');
+    if (!sheet) return;
+    lastFocused = lastFocused || document.activeElement;
+    sheet.setAttribute('aria-hidden', 'false');
+    pushOverlay('search');
+    if (opts.push !== false) pushUI('search');
+    const input = $('#sheetSearchInput');
+    if (input) {
+      input.value = state.q;
+      $('#sheetSearchClear').hidden = !input.value;
+      renderRecentSearches();
+      renderSheetResults(input.value);
+    }
+    if (opts.focus !== false) setTimeout(() => input && input.focus({ preventScroll: true }), 180);
+  }
+
+  function closeSearchSheet(opts = {}) {
+    const sheet = $('#searchSheet');
+    if (!sheet || sheet.getAttribute('aria-hidden') === 'true') return;
+    if (!opts.fromHistory && closeUI('search')) return;
+    sheet.setAttribute('aria-hidden', 'true');
+    popOverlay('search');
+    const input = $('#sheetSearchInput');
+    if (input) input.blur();
+  }
+
+  function rememberSearch(q) {
+    const value = q.trim();
+    if (value.length < 2) return;
+    recentSearches = [value, ...recentSearches.filter((x) => x.toLowerCase() !== value.toLowerCase())].slice(0, 8);
+    saveRecent();
+  }
+
+  function renderRecentSearches() {
+    const block = $('#recentBlock');
+    const list = $('#recentList');
+    if (!block || !list) return;
+    block.hidden = recentSearches.length === 0;
+    list.innerHTML = recentSearches.map((q) => `<button type="button" class="recent-chip" data-recent="${esc(q)}">
+      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="12" cy="12" r="8.4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7.6V12l3 1.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      ${esc(q)}</button>`).join('');
+  }
+
+  function renderSheetResults(query) {
+    const box = $('#searchResults');
+    const empty = $('#searchEmpty');
+    const title = $('#searchResultsTitle');
+    if (!box) return;
+    const q = (query || '').trim();
+    const all = RECIPES.filter((r) => matches(r, { q, section: 'all', tags: new Set(), favOnly: false }))
+      .sort((a, b) => a._index - b._index);
+    const list = all.slice(0, 40);
+    if (title) title.textContent = q ? `Найдено: ${all.length}` : 'Все рецепты';
+    empty.hidden = all.length > 0 || !q;
+    box.innerHTML = list.map((r) => {
+      const n = r._primary;
+      return `<button type="button" class="srow" data-open-recipe="${esc(r.id)}">
+        <img src="${esc(r.photo)}" alt="" loading="lazy" decoding="async">
+        <span class="srow-main">
+          <span class="srow-title">${highlight(r.title, q)}</span>
+          <span class="srow-meta"><span><b>${fmt(n.kcal100)}</b> ккал</span><span>Б <b>${formatMacro(n.protein100)}</b></span><span>${esc(SHORT_SECTION[r.section] || r.section)}</span></span>
+        </span>
+        <span class="srow-go" aria-hidden="true">›</span>
+      </button>`;
+    }).join('');
+  }
+
+  function applySearch(value, opts = {}) {
+    state.q = value.trim();
+    const main = $('#searchInput');
+    if (main) main.value = state.q;
+    const clear = $('#searchClear');
+    if (clear) clear.hidden = !state.q;
+    const pill = $('#searchPill');
+    if (pill) {
+      pill.classList.toggle('has-query', !!state.q);
+      const label = pill.querySelector('span');
+      if (label) label.textContent = state.q || 'Найти рецепт или ингредиент';
+    }
+    renderAll();
+    if (opts.remember) rememberSearch(state.q);
+  }
+
+  /* ---------- вкладки нижней навигации ---------- */
+  function setActiveTab(tab) {
+    $$('#tabbar .tab').forEach((b) => {
+      const on = b.dataset.tab === tab;
+      if (on) b.setAttribute('aria-current', 'page');
+      else b.removeAttribute('aria-current');
+    });
+  }
+
+  function goToTab(tab) {
+    if (tab === 'search') {
+      setActiveTab('search');
+      openSearchSheet();
+      return;
+    }
+    if (tab === 'favorites') {
+      // избранное показываем без остальных ограничений — иначе легко получить пустоту
+      state.favOnly = true;
+      state.tags.clear();
+      state.maxKcal = 400;
+      state.minProtein = 0;
+      state.section = 'all';
+      applySearch('');
+      syncFilterInputs();
+      renderAll();
+      setActiveTab('favorites');
+      scrollToCatalog();
+      return;
+    }
+    if (tab === 'shopping') {
+      setActiveTab('shopping');
+      openDrawer();
+      return;
+    }
+    // catalog
+    state.favOnly = false;
+    syncFilterInputs();
+    renderAll();
+    setActiveTab('catalog');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function openRandom() {
+    const list = getVisible();
+    if (!list.length) { toast('Нет рецептов под текущие фильтры'); return; }
+    const r = list[Math.floor(Math.random() * list.length)];
+    openRecipe(r.id);
+  }
+
+  function scrollToCatalog() {
+    const catalog = $('#catalog');
+    if (!catalog) return;
+    const header = $('#appbar');
+    const offset = (header ? header.getBoundingClientRect().height : 0) + 8;
+    const y = catalog.getBoundingClientRect().top + window.scrollY - offset;
+    window.scrollTo({ top: Math.max(0, y), behavior: 'smooth' });
   }
 
   /* ---------- favorites ---------- */
@@ -595,12 +862,14 @@
       b.setAttribute('aria-pressed', String(on));
       b.title = on ? 'Убрать из избранного' : 'В избранное';
     });
-    const modalBtn = $('[data-fav-modal]');
-    if (modalBtn) {
-      const on = favorites.has(modalBtn.dataset.favModal);
-      modalBtn.textContent = on ? '♥ В избранном' : '♡ В избранное';
-      modalBtn.setAttribute('aria-pressed', String(on));
-    }
+    $$('[data-fav-modal]').forEach((btn) => {
+      const id = btn.dataset.favModal;
+      if (!id) return;
+      const on = favorites.has(id);
+      btn.setAttribute('aria-pressed', String(on));
+      if (btn.classList.contains('btn')) btn.textContent = on ? '♥ В избранном' : '♡ В избранное';
+      else btn.setAttribute('aria-label', on ? 'Убрать из избранного' : 'В избранное');
+    });
     renderCounts();
   }
 
@@ -646,17 +915,26 @@
     body.innerHTML = html.join('');
   }
 
-  function openDrawer() {
+  function openDrawer(opts = {}) {
     renderDrawer();
     $('#drawer').setAttribute('aria-hidden', 'false');
-    document.body.classList.add('no-scroll');
-    const close = $('#drawer .icon-btn');
-    if (close) close.focus({ preventScroll: true });
+    pushOverlay('drawer');
+    setActiveTab('shopping');
+    if (opts.push !== false) pushUI('shopping');
+    if (!isMobile()) {
+      const close = $('#drawer .icon-btn');
+      if (close) close.focus({ preventScroll: true });
+    }
   }
 
-  function closeDrawer() {
-    $('#drawer').setAttribute('aria-hidden', 'true');
-    if ($('#modal').getAttribute('aria-hidden') === 'true') document.body.classList.remove('no-scroll');
+  function closeDrawer(opts = {}) {
+    const drawer = $('#drawer');
+    if (drawer.getAttribute('aria-hidden') === 'true') return;
+    if (!opts.fromHistory && closeUI('shopping')) return;
+    drawer.setAttribute('aria-hidden', 'true');
+    popOverlay('drawer');
+    if (state.favOnly) setActiveTab('favorites');
+    else setActiveTab('catalog');
   }
 
   function copyText(text) {
@@ -704,6 +982,21 @@
     return out.join('\n');
   }
 
+  /* ---------- поделиться ---------- */
+  function shareRecipe(r) {
+    const url = location.origin + location.pathname + '#recipe=' + encodeURIComponent(r.id);
+    const data = {
+      title: r.title,
+      text: `${r.title} — ${fmt(r._primary.kcal100)} ккал на 100 г, Б ${formatMacro(r._primary.protein100)} г`,
+      url
+    };
+    if (navigator.share) {
+      navigator.share(data).catch(() => { /* отменили */ });
+      return;
+    }
+    copyText(url);
+  }
+
   /* ---------- toast ---------- */
   let toastTimer = null;
   function toast(message) {
@@ -746,20 +1039,103 @@
       clearTimeout(searchTimer);
       const val = input.value;
       $('#searchClear').hidden = !val;
-      searchTimer = setTimeout(() => {
-        state.q = val.trim();
-        renderAll();
-      }, 140);
+      searchTimer = setTimeout(() => applySearch(val), 140);
     });
     input.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { input.value = ''; state.q = ''; $('#searchClear').hidden = true; renderAll(); input.blur(); }
+      if (e.key === 'Escape') { applySearch(''); input.blur(); }
+      if (e.key === 'Enter') { rememberSearch(input.value); }
     });
     $('#searchClear').addEventListener('click', () => {
-      input.value = '';
-      state.q = '';
-      $('#searchClear').hidden = true;
-      renderAll();
+      applySearch('');
       input.focus();
+    });
+
+    // --- мобильный поиск ---
+    const pill = $('#searchPill');
+    if (pill) pill.addEventListener('click', () => openSearchSheet());
+
+    const sheetInput = $('#sheetSearchInput');
+    if (sheetInput) {
+      sheetInput.addEventListener('input', () => {
+        const val = sheetInput.value;
+        $('#sheetSearchClear').hidden = !val;
+        clearTimeout(sheetSearchTimer);
+        sheetSearchTimer = setTimeout(() => {
+          applySearch(val);
+          renderSheetResults(val);
+        }, 120);
+      });
+      sheetInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          applySearch(sheetInput.value, { remember: true });
+          renderSheetResults(sheetInput.value);
+          closeSearchSheet();
+          scrollToCatalog();
+        }
+      });
+    }
+    const sheetClear = $('#sheetSearchClear');
+    if (sheetClear) sheetClear.addEventListener('click', () => {
+      if (sheetInput) { sheetInput.value = ''; sheetInput.focus(); }
+      sheetClear.hidden = true;
+      applySearch('');
+      renderSheetResults('');
+    });
+
+    const recentList = $('#recentList');
+    if (recentList) recentList.addEventListener('click', (e) => {
+      const chip = e.target.closest('[data-recent]');
+      if (!chip) return;
+      const q = chip.dataset.recent;
+      if (sheetInput) { sheetInput.value = q; $('#sheetSearchClear').hidden = false; }
+      applySearch(q, { remember: true });
+      renderSheetResults(q);
+    });
+
+    const searchResults = $('#searchResults');
+    if (searchResults) searchResults.addEventListener('click', (e) => {
+      const row = e.target.closest('[data-open-recipe]');
+      if (!row) return;
+      rememberSearch(state.q);
+      // закрываем шторку без отката истории: рецепт добавит свою запись,
+      // и «назад» вернёт пользователя к результатам поиска
+      closeSearchSheet({ fromHistory: true });
+      openRecipe(row.dataset.openRecipe);
+    });
+
+    // --- вкладки ---
+    const tabbar = $('#tabbar');
+    if (tabbar) tabbar.addEventListener('click', (e) => {
+      const tab = e.target.closest('[data-tab]');
+      if (!tab) return;
+      goToTab(tab.dataset.tab);
+    });
+
+    // --- мобильная панель ---
+    const mFilter = $('#mFilterBtn');
+    if (mFilter) mFilter.addEventListener('click', () => setFilterPanel(true));
+    const mReset = $('#mResetBtn');
+    if (mReset) mReset.addEventListener('click', resetFilters);
+    const mRandom = $('#mRandomBtn');
+    if (mRandom) mRandom.addEventListener('click', openRandom);
+
+    const filterReset = $('#filterReset');
+    if (filterReset) filterReset.addEventListener('click', resetFilters);
+    const filterApply = $('#filterApply');
+    if (filterApply) filterApply.addEventListener('click', () => {
+      setFilterPanel(false);
+      scrollToCatalog();
+    });
+
+    const sortSeg = $('#sortSeg');
+    if (sortSeg) sortSeg.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-sort]');
+      if (!b) return;
+      state.sort = b.dataset.sort;
+      $('#sortSelect').value = state.sort;
+      renderCounts();
+      renderResults();
     });
 
     // categories
@@ -787,6 +1163,14 @@
 
     // filters
     $('#filterBtn').addEventListener('click', () => setFilterPanel(!state.filtersOpen));
+    const filterPanel = $('#filterPanel');
+    if (filterPanel) {
+      filterPanel.addEventListener('click', (e) => {
+        // клик по затемнению (::before) закрывает шторку
+        if (e.target === filterPanel) setFilterPanel(false);
+      });
+      attachSheetDrag(filterPanel, filterPanel.querySelector('.sheet-grip'), () => setFilterPanel(false));
+    }
     $('#tagCloud').addEventListener('click', (e) => {
       const btn = e.target.closest('[data-tag]');
       if (!btn) return;
@@ -860,12 +1244,7 @@
     });
 
     // random
-    $('#randomBtn').addEventListener('click', () => {
-      const list = getVisible();
-      if (!list.length) { toast('Нет рецептов под текущие фильтры'); return; }
-      const r = list[Math.floor(Math.random() * list.length)];
-      openRecipe(r.id);
-    });
+    $('#randomBtn').addEventListener('click', openRandom);
 
     // grid
     const grid = $('#grid');
@@ -908,6 +1287,28 @@
     $('#prevRecipe').addEventListener('click', () => navigateRecipe(-1));
     $('#nextRecipe').addEventListener('click', () => navigateRecipe(1));
 
+    const shareBtn = $('#shareRecipe');
+    if (shareBtn) shareBtn.addEventListener('click', () => {
+      if (currentRecipe) shareRecipe(currentRecipe);
+    });
+
+    // мини-заголовок появляется при прокрутке рецепта
+    const modalContent = $('#modalContent');
+    if (modalContent) {
+      modalContent.addEventListener('scroll', () => {
+        const mini = $('#modalMini');
+        if (mini) mini.classList.toggle('show', modalContent.scrollTop > 150);
+      }, { passive: true });
+    }
+
+    const searchSheet = $('#searchSheet');
+    if (searchSheet) {
+      searchSheet.addEventListener('click', (e) => {
+        if (e.target.closest('[data-close="search"]')) closeSearchSheet();
+      });
+      attachSheetDrag(searchSheet.querySelector('.sheet-panel'), searchSheet.querySelector('.sheet-grip'), closeSearchSheet);
+    }
+
     // drawer
     $('#drawer').addEventListener('click', (e) => {
       if (e.target.closest('[data-close="drawer"]')) { closeDrawer(); return; }
@@ -923,6 +1324,15 @@
         saveShopping(); renderDrawer(); renderCounts();
       }
     });
+    const drawerPanel = $('#drawer .drawer-panel');
+    if (drawerPanel) attachSheetDrag(drawerPanel, drawerPanel.querySelector('.sheet-grip'), closeDrawer);
+
+    const modalPanel = $('#modalPanel');
+    if (modalPanel) {
+      attachSheetDrag(modalPanel, modalPanel.querySelector(':scope > .sheet-grip'), () => closeModal());
+      attachSheetDrag(modalPanel, $('#modalMini'), () => closeModal());
+    }
+
     $('#copyShopping').addEventListener('click', () => {
       if (!shopping.length) { toast('Список пуст'); return; }
       copyText(shoppingToText());
@@ -940,8 +1350,11 @@
       const typing = tag === 'input' || tag === 'textarea' || tag === 'select';
       if (e.key === '/' && !typing) { e.preventDefault(); $('#searchInput').focus(); return; }
       if (e.key === 'Escape') {
-        if ($('#drawer').getAttribute('aria-hidden') === 'false') { closeDrawer(); return; }
-        if ($('#modal').getAttribute('aria-hidden') === 'false') { closeModal(); return; }
+        const top = topOverlay();
+        if (top === 'search') { closeSearchSheet(); return; }
+        if (top === 'drawer') { closeDrawer(); return; }
+        if (top === 'recipe') { closeModal(); return; }
+        if (state.filtersOpen) { setFilterPanel(false); return; }
       }
       if ($('#modal').getAttribute('aria-hidden') === 'false') {
         if (!typing && e.key === 'ArrowLeft') { e.preventDefault(); navigateRecipe(-1); }
@@ -952,11 +1365,15 @@
 
     // sticky shadow
     const toolbar = $('#toolbar');
+    const appbar = $('#appbar');
     const onScroll = () => {
       const top = toolbar.getBoundingClientRect().top;
-      toolbar.classList.toggle('is-stuck', top <= 1);
+      const appbarH = appbar ? appbar.getBoundingClientRect().height : 0;
+      toolbar.classList.toggle('is-stuck', top <= appbarH + 2);
+      if (appbar) appbar.classList.toggle('is-scrolled', window.scrollY > 8);
     };
     window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
 
     // history
     window.addEventListener('popstate', syncFromHash);
@@ -972,14 +1389,236 @@
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   }
 
+  function clearHash() {
+    try { history.replaceState({}, '', location.pathname + location.search); } catch (e) { /* noop */ }
+  }
+
   function syncFromHash() {
-    const m = location.hash.match(/^#recipe=(.+)$/);
-    if (m) {
-      const id = decodeURIComponent(m[1]);
+    const hash = location.hash || '';
+    const m = hash.match(/^#recipe=(.+)$/);
+    const id = m ? decodeURIComponent(m[1]) : null;
+
+    if (id) {
       if (!currentRecipe || currentRecipe.id !== id) openRecipe(id, { push: false });
     } else if (currentRecipe) {
-      closeModal({ clearHash: false });
+      closeModal({ clearHash: false, fromHistory: true });
     }
+
+    // шторки
+    const wantSearch = hash === '#search';
+    const wantShopping = hash === '#shopping';
+    const wantFilters = hash === '#filters';
+
+    if ($('#searchSheet').getAttribute('aria-hidden') === 'false' && !wantSearch) {
+      closeSearchSheet({ fromHistory: true });
+    }
+    if (wantSearch && $('#searchSheet').getAttribute('aria-hidden') === 'true') {
+      openSearchSheet({ push: false });
+    }
+
+    if ($('#drawer').getAttribute('aria-hidden') === 'false' && !wantShopping) {
+      closeDrawer({ fromHistory: true });
+    }
+    if (wantShopping && $('#drawer').getAttribute('aria-hidden') === 'true') {
+      openDrawer({ push: false });
+    }
+
+    const filtersVisible = !$('#filterPanel').hidden;
+    if (filtersVisible && !wantFilters) setFilterPanel(false, { fromHistory: true });
+    if (wantFilters && !filtersVisible) setFilterPanel(true, { push: false });
+
+    // ярлыки из манифеста
+    if (hash === '#favorites') { clearHash(); goToTab('favorites'); return; }
+  }
+
+  /* ============================================================
+     PWA: установка, офлайн, обновления
+     ============================================================ */
+  const PWA = {
+    deferredPrompt: null,
+    updateWorker: null,
+    standalone: window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true,
+
+    init() {
+      this.watchDisplayMode();
+      this.watchNetwork();
+      this.watchInstall();
+      this.register();
+    },
+
+    watchDisplayMode() {
+      const mq = window.matchMedia('(display-mode: standalone)');
+      const onChange = () => { this.standalone = mq.matches; this.hideInstall(); };
+      if (mq.addEventListener) mq.addEventListener('change', onChange);
+    },
+
+    watchNetwork() {
+      const bar = $('#offlineBar');
+      const update = () => {
+        if (bar) bar.hidden = navigator.onLine;
+        document.documentElement.classList.toggle('is-offline', !navigator.onLine);
+      };
+      window.addEventListener('online', update);
+      window.addEventListener('offline', update);
+      update();
+    },
+
+    watchInstall() {
+      window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        this.deferredPrompt = e;
+        this.maybeShowInstall();
+      });
+      window.addEventListener('appinstalled', () => {
+        this.deferredPrompt = null;
+        this.hideInstall();
+        store.set('ppsk.installDismissed', true);
+        toast('Приложение установлено');
+      });
+      const btn = $('#installBtn');
+      if (btn) btn.addEventListener('click', () => this.promptInstall());
+      const close = $('#installClose');
+      if (close) close.addEventListener('click', () => {
+        this.hideInstall();
+        store.set('ppsk.installDismissed', true);
+      });
+      const icon = $('#installIcon');
+      if (icon) icon.addEventListener('click', () => this.promptInstall());
+      this.maybeShowInstall();
+    },
+
+    maybeShowInstall() {
+      if (this.standalone || store.get('ppsk.installDismissed', false)) return;
+      const banner = $('#installBanner');
+      if (!banner) return;
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+        (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      if (this.deferredPrompt) {
+        const hint = $('#installHint');
+        if (hint) hint.textContent = 'Открывается на весь экран и работает офлайн';
+        banner.hidden = false;
+      } else if (isIOS) {
+        const hint = $('#installHint');
+        if (hint) hint.textContent = 'Safari: «Поделиться» → «На экран Домой»';
+        const btn = $('#installBtn');
+        if (btn) btn.textContent = 'Как?';
+        banner.hidden = false;
+      }
+    },
+
+    hideInstall() {
+      const banner = $('#installBanner');
+      if (banner) banner.hidden = true;
+    },
+
+    async promptInstall() {
+      if (!this.deferredPrompt) {
+        toast('Откройте меню браузера → «Установить приложение»');
+        return;
+      }
+      this.deferredPrompt.prompt();
+      try {
+        const choice = await this.deferredPrompt.userChoice;
+        if (choice && choice.outcome === 'accepted') this.hideInstall();
+      } catch (e) { /* пользователь закрыл */ }
+      this.deferredPrompt = null;
+    },
+
+    register() {
+      if (!('serviceWorker' in navigator)) return;
+      if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
+
+      navigator.serviceWorker.register('sw.js').then((reg) => {
+        if (reg.waiting) this.showUpdate(reg.waiting);
+        reg.addEventListener('updatefound', () => {
+          const worker = reg.installing;
+          if (!worker) return;
+          worker.addEventListener('statechange', () => {
+            if (worker.state === 'installed' && navigator.serviceWorker.controller) {
+              this.showUpdate(worker);
+            }
+          });
+        });
+        // тихая проверка обновлений при возврате в приложение
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') reg.update().catch(() => {});
+        });
+      }).catch(() => { /* офлайн-режим недоступен */ });
+
+      // Перезагружаемся только при смене уже существующего контроллера
+      // (обновление). Первая установка SW тоже вызывает controllerchange,
+      // и слепая перезагрузка ломала бы deep-link'и вроде #favorites.
+      const hadController = !!navigator.serviceWorker.controller;
+      let reloading = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (!hadController || reloading) return;
+        reloading = true;
+        location.reload();
+      });
+    },
+
+    showUpdate(worker) {
+      this.updateWorker = worker;
+      const bar = $('#updateBar');
+      if (!bar) return;
+      bar.hidden = false;
+      const btn = $('#updateBtn');
+      if (btn) {
+        btn.onclick = () => {
+          worker.postMessage({ type: 'SKIP_WAITING' });
+          bar.hidden = true;
+        };
+      }
+    }
+  };
+
+  /* ============================================================
+     Жесты: свайп вниз закрывает шторку
+     ============================================================ */
+  function attachSheetDrag(panel, handle, onClose) {
+    if (!panel || !handle || handle.dataset.dragBound === '1') return;
+    handle.dataset.dragBound = '1';
+    let startY = 0;
+    let dy = 0;
+    let dragging = false;
+    let startTime = 0;
+
+    handle.addEventListener('pointerdown', (e) => {
+      if (!isMobile() || e.button !== 0) return;
+      if (e.target.closest('input, button, a, select')) return;
+      dragging = true;
+      startY = e.clientY;
+      dy = 0;
+      startTime = performance.now();
+      panel.style.transition = 'none';
+      if (handle.setPointerCapture) {
+        try { handle.setPointerCapture(e.pointerId); } catch (err) { /* noop */ }
+      }
+    });
+
+    handle.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      dy = Math.max(0, e.clientY - startY);
+      panel.style.transform = `translateY(${dy}px)`;
+    });
+
+    const finish = () => {
+      if (!dragging) return;
+      dragging = false;
+      panel.style.transition = '';
+      const fast = performance.now() - startTime < 320;
+      if (dy > 110 || (fast && dy > 46)) {
+        panel.style.transform = '';
+        onClose();
+      } else {
+        panel.style.transform = '';
+      }
+      dy = 0;
+    };
+
+    handle.addEventListener('pointerup', finish);
+    handle.addEventListener('pointercancel', finish);
+    handle.addEventListener('lostpointercapture', finish);
   }
 
   /* ---------- init ---------- */
@@ -989,7 +1628,11 @@
     syncFilterInputs();
     renderAll();
     bindEvents();
+    setActiveTab('catalog');
     syncFromHash();
+    PWA.init();
+    // подстраховка: тема могла не примениться из inline-скрипта
+    if (!document.documentElement.getAttribute('data-theme')) initTheme();
   }
 
   init();
