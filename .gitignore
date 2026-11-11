@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# редакторы
+.vscode/
+.idea/
+*.swp
+
+# служебное для локального просмотра и проверки
+node_modules/
+.cache/
+.npm-cache/
+.venv/
+shots/
+*.log
