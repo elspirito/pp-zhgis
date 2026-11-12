@@ -1,0 +1,15 @@
+# служебное, не нужно на хостинге
+node_modules/
+.npm-cache/
+.home/
+.vercel/
+package.json
+package-lock.json
+tools/
+*.log
+.DS_Store
+
+# репозиторий и документация
+.git/
+.gitignore
+README.md

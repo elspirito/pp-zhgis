@@ -15,3 +15,10 @@ node_modules/
 .venv/
 shots/
 *.log
+
+# локальные инструменты деплоя
+.home/
+.vercel/
+package.json
+package-lock.json
+.vercel
